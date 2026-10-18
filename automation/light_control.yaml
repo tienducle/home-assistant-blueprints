@@ -1,0 +1,361 @@
+blueprint:
+  name: Light Control (v0.0.4)
+  description: "Controls lights based on motion and occupancy."
+  source_url: https://github.com/tienducle/home-assistant-blueprints/blob/main/automation/light_control.yaml
+  domain: automation
+  input:
+    light_entities:
+      name: Light entities
+      description: Lights to be controlled
+      selector:
+        entity:
+          multiple: true
+          filter:
+            domain: light
+    motion_entities:
+      name: Motion entities
+      description: Motion entities to be monitored to control lights. If multiple entities are specified, any entity can trigger the automation.
+      selector:
+        entity:
+          multiple: true
+          filter:
+            domain: binary_sensor
+            device_class:
+              - motion
+              - occupancy
+              - door
+    illuminance_entities:
+      name: Illuminance entities (Optional)
+      description: Illuminance entities to be checked before turning on the lights. If multiple entities are specified, the average illuminance will be taken for evaluation.
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            domain: sensor
+            device_class: illuminance
+    illuminance_threshold:
+      name: Illuminance threshold
+      description: When it's brighter than the threshold, the lights will not be turned on.
+      default: 25
+      selector:
+        number:
+          min: 1
+          max: 10000
+          unit_of_measurement: "lx"
+    illuminance_exceeding_threshold:
+      name: Illuminance exceeding threshold
+      description: If it's brighter than the configured threshold, the lights will be turned off immediately. Use this to turn off the lights when for example the sun is shining bright enough and the lights in the room are not needed anymore.
+      default: 100
+      selector:
+        number:
+          min: 1
+          max: 10000
+          unit_of_measurement: "lx"
+    presence_entities:
+      name: Presence entities (Optional)
+      description: Presence entites to be monitored
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            domain: binary_sensor
+            device_class:
+              - presence
+              - door
+    timeout_seconds:
+      name: Timeout seconds
+      description: Time to wait after motion or occupancy cleared
+      default: 90
+      selector:
+        number:
+          min: 0
+          max: 3600
+          unit_of_measurement: seconds
+    helper_external_brightness_variable:
+      name: Helper (Optional) - External brightness (percentage) variable
+      description: Specify an external variable that will provide the brightness level (0 to 100)
+      default: []
+      selector:
+        entity:
+          filter:
+            domain: input_number
+    helper_external_occupancy_variable:
+      name: Helper (Optional) - External occupancy variable
+      description: Specify a variable that will indicate occupancy to keep lights on. Use this if you have an occupancy solution that is not based on presence entities. If the variable is set to true, the lights will not be turned off. If the variable changes to false, the automation will determine if the lights should be turned off.
+      default: []
+      selector:
+        entity:
+          filter:
+            domain: input_boolean
+    helper_external_override_variable:
+      name: Helper (Optional) - External override variable
+      description: Specify a variable that can override the behaviour of the automation. If the variable is set to false, no actions will be taken. Use this to temporary disable the automation.
+      default: []
+      selector:
+        entity:
+          filter:
+            domain: input_boolean
+    override_expiration_minutes:
+      name: Override Expiration minutes
+      description: Use this to re-enable the automation after it was disabled using the override variable for the specified amount of time.
+      default: 60
+      selector:
+        number:
+          min: 1
+          max: 1440
+          unit_of_measurement: minutes
+
+# If motion is detected within the delay, the script is restarted.
+mode: restart
+max_exceeded: silent
+
+variables:
+  helper_external_brightness_variable: !input helper_external_brightness_variable
+  timeout_seconds: !input timeout_seconds
+  light_entities: !input light_entities
+  motion_entities: !input motion_entities
+  illuminance_threshold: !input illuminance_threshold
+  illuminance_exceeding_threshold: !input illuminance_exceeding_threshold
+  presence_entities: !input presence_entities
+  helper_external_override_variable: !input helper_external_override_variable
+  #override_expiration_minutes: !input override_expiration_minutes
+
+trigger_variables:
+  helper_external_occupancy_variable: !input helper_external_occupancy_variable
+  #helper_external_override_variable: !input helper_external_override_variable
+  illuminance_entities: !input illuminance_entities
+  illuminance_threshold: !input illuminance_threshold
+  illuminance_exceeding_threshold: !input illuminance_exceeding_threshold
+  override_expiration_minutes: !input override_expiration_minutes
+
+trigger:
+# Motion
+  - trigger: state
+    entity_id: !input motion_entities
+    from: "off"
+    to: "on"
+    id: motion_detected
+  - trigger: state
+    entity_id: !input motion_entities
+    from: "on"
+    to: "off"
+    id: motion_cleared
+# Presence
+  - trigger: state
+    entity_id: !input presence_entities
+    from: "on"
+    to: "off"
+    id: presence_cleared
+# External occupancy variable
+  - trigger: template
+    value_template: "{{ (helper_external_occupancy_variable is defined and helper_external_occupancy_variable|length != 0 ) and (states(helper_external_occupancy_variable) != 'unknown') and is_state( helper_external_occupancy_variable, 'off' ) }}"
+    id: occupancy_cleared
+# External override variable
+  - trigger: state
+    entity_id: !input helper_external_override_variable
+    from: "on"
+    to: "off"
+    id: disabled_by_override
+  - trigger: state
+    entity_id: !input helper_external_override_variable
+    from: "on"
+    to: "off"
+    for:
+      hours: 0
+      minutes: "{{ override_expiration_minutes }}"
+      seconds: 0
+    id: override_expired
+# Illuminance
+  - trigger: numeric_state
+    entity_id: !input illuminance_entities
+    value_template: >-
+      {%- if illuminance_entities is defined and illuminance_entities|length != 0 %}
+      {{ ((illuminance_entities|map('states')|map('int', default=0)|sum)/(illuminance_entities|length)) }}
+      {%- else %}
+      0
+      {%- endif %}
+    above: !input illuminance_exceeding_threshold
+    id: illuminance_is_above_threshold
+
+action:
+# when manually triggered, then trigger object contains: {'platform': None}
+#  - service: system_log.write
+#    data:
+#      level: debug
+#      message: "{{ trigger }}"
+#      logger: "custom.{{ this.entity_id }}"
+  - choose:
+    - conditions:
+      # Motion detected
+      - condition: trigger
+        id: motion_detected
+      sequence:
+      - if:
+        # If external override variable is defined and disabled, no action will be taken.
+        - condition: template
+          value_template: "{{ states(helper_external_override_variable) == 'off' if helper_external_override_variable is defined and helper_external_override_variable|length != 0 else False }}"
+        then:
+        - action: system_log.write
+          data:
+            level: debug
+            message: "{{ trigger.id }} but {{ helper_external_override_variable }} is disabled. Will not take any action."
+            logger: "custom.{{ this.entity_id }}"
+        else:
+        - variables:
+            # Average of all illuminance sensors, if available, otherwise it will be 0.
+            illuminance_average_value: "{{ ((illuminance_entities|map('states')|map('int')|sum)/(illuminance_entities|length|default(1, true)))|int }}"
+        - if:
+          # If illuminance is below the configured threshold, the lights will be turned on
+          - condition: template
+            value_template: "{{ illuminance_average_value < illuminance_threshold }}"
+          then:
+          - variables:
+              # Use value of external brightness variable if defined.
+              # Otherwise, fall back to simply 100% brightness.
+              target_brightness_pct: >-
+                {%- if helper_external_brightness_variable | length > 0 -%}
+                  {{ states(helper_external_brightness_variable) | float(100.0) }}
+                {%- else -%}
+                  100.0
+                {%- endif -%}
+          - action: system_log.write
+            data:
+              level: debug
+              message: "{{ trigger.id }}. Illuminance average of {{ illuminance_average_value }}lx is lower than threshold {{ illuminance_threshold }}. Turning {{ light_entities }} on to {{ target_brightness_pct }}"
+              logger: "custom.{{ this.entity_id }}"
+          - action: light.turn_on
+            target:
+              entity_id: !input light_entities
+            data:
+              transition: 1
+              brightness_pct: "{{ target_brightness_pct }}"
+          else:
+          - action: system_log.write
+            data:
+              level: debug
+              message: "{{ trigger.id }}. Illuminance average of {{ illuminance_average_value }}lx is higher than threshold {{ illuminance_threshold }}lx. Will not take any action."
+              logger: "custom.{{ this.entity_id }}"
+    - conditions:
+      # Motion/Presence/Occupancy cleared
+      # If external override is enabled, no action will be taken.
+      # If motion is still detected, no action will be taken.
+      # If presence is still detected, no action will be taken.
+      # If external occupancy is enabled, no action will be taken.
+      # Otherwise, turn off lights after defined timeout.
+      - condition: or
+        conditions:
+        - condition: trigger
+          id: motion_cleared
+        - condition: trigger
+          id: presence_cleared
+        - condition: trigger
+          id: occupancy_cleared
+        - condition: trigger
+          id: illuminance_is_above_threshold
+      sequence:
+      - if:
+        #  If external override is disabled, no action will be taken.
+        - condition: template
+          value_template: "{{ states(helper_external_override_variable) == 'off' if helper_external_override_variable is defined and helper_external_override_variable|length != 0 else False }}"
+        then:
+        - action: system_log.write
+          data:
+            level: debug
+            message: "{{ trigger.id }} but {{ helper_external_override_variable }} is enabled. Will not turn off {{ light_entities }}."
+            logger: "custom.{{ this.entity_id }}"
+        else:
+        - if:
+          # If illuminance is higher than illuminance_exceeding_threshold (e.g. sun is now shining brightly), turn off lights immediately.
+          - condition: trigger
+            id: illuminance_is_above_threshold
+          then:
+            - variables:
+                # Average of all illuminance sensors, if available, otherwise it will be 0.
+                illuminance_average_value: "{{ ((illuminance_entities|map('states')|map('int')|sum)/(illuminance_entities|length|default(1, true)))|int }}"
+            - action: system_log.write
+              data:
+                level: debug
+                message: "{{ trigger.id }}. Illuminance average of {{ illuminance_average_value }}lx is above {{ illuminance_exceeding_threshold }}. Turning off {{ light_entities }}.."
+                logger: "custom.{{ this.entity_id }}"
+            - action: light.turn_off
+              target:
+                entity_id: !input light_entities
+          else:
+          - if:
+            # If motion is still detected, no action will be taken.
+            - condition: state
+              entity_id: !input motion_entities
+              state: "on"
+            then:
+            - action: system_log.write
+              data:
+                level: debug
+                message: "{{ trigger.id }} but {{ motion_entities }} are still detecting motion. Will not turn off {{ light_entities }}."
+                logger: "custom.{{ this.entity_id }}"
+            else:
+            - if:
+              # If presence is still detected, no action will be taken.
+              - condition: and
+                conditions:
+                - condition: template
+                  value_template: "{{ True if presence_entities is defined and presence_entities|length != 0 else False }}"
+                - condition: state
+                  entity_id: !input presence_entities
+                  state: "on"
+              then:
+              - action: system_log.write
+                data:
+                  level: debug
+                  message: "{{ trigger.id }} but {{ presence_entities }} are still detecting presence. Will not turn off {{ light_entities }}."
+                  logger: "custom.{{ this.entity_id }}"
+              else:
+              - if:
+                # If external occupancy is enabled, no action will be taken.
+                - condition: template
+                  value_template: "{{ states(helper_external_occupancy_variable) == 'on' if helper_external_occupancy_variable is defined and helper_external_occupancy_variable|length != 0 else False }}"
+                then:
+                - action: system_log.write
+                  data:
+                    level: debug
+                    message: "{{ trigger.id }} but occupancy still detected. Will not turn off {{ light_entities }}."
+                    logger: "custom.{{ this.entity_id }}"
+                else:
+                # Turn off lights after configured timeout
+                - action: system_log.write
+                  data:
+                    level: debug
+                    message: "{{ trigger.id }}. Waiting {{ timeout_seconds }} seconds before turning off {{ light_entities }}.."
+                    logger: "custom.{{ this.entity_id }}"
+                - delay: !input timeout_seconds
+                - action: light.turn_off
+                  target:
+                    entity_id: !input light_entities
+    # Disabled by override variable
+    - conditions:
+      - condition: trigger
+        id: disabled_by_override
+      sequence:
+      - action: system_log.write
+        data:
+          level: debug
+          message: "{{ trigger.id }}"
+          logger: "custom.{{ this.entity_id }}"
+    # Override expired
+    - conditions:
+      - condition: trigger
+        id: override_expired
+      sequence:
+      - action: system_log.write
+        data:
+          level: debug
+          message: "{{ trigger.id }}. Waiting {{ timeout_seconds }} seconds before turning off {{ light_entities }}.."
+          logger: "custom.{{ this.entity_id }}"
+      - action: input_boolean.turn_on
+        target:
+          entity_id: "{{ helper_external_override_variable }}"
+      - delay: !input timeout_seconds
+      - action: light.turn_off
+        target:
+          entity_id: !input light_entities
